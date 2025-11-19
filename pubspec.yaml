@@ -1,0 +1,26 @@
+name: profesoresymatones
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # keep only the Flutter SDK dependency for a minimal project
+  http: ^0.13.6
+  provider: ^6.0.5
+  shared_preferences: ^2.1.1
+  web_socket_channel: ^2.2.0
+  signalr_core: ^1.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  # flutter_lints removed to avoid extension/lint prompts
+
+flutter:
+  uses-material-design: true
+  # no extra assets declared
