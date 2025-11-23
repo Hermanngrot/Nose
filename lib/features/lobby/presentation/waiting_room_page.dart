@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'dart:async';
 
 import '../state/lobby_controller.dart';
 import '../../../core/models/room_summary_dto.dart';
-import '../../../core/models/game_state_dto.dart';
 import '../../auth/presentation/logout_button.dart';
 import '../../auth/state/auth_controller.dart';
 import '../../game/state/game_controller.dart';
@@ -19,6 +19,7 @@ class WaitingRoomPage extends StatefulWidget {
 }
 
 class _WaitingRoomPageState extends State<WaitingRoomPage> {
+  Timer? _roomWatcherTimer;
   @override
   void initState() {
     super.initState();
@@ -61,7 +62,79 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
 
       // start polling so the waiting room updates automatically
       // Polling merged safely in controller; enable it for normal behavior.
-      ctrl.startPolling(intervalSeconds: 3);
+      // Use a shorter interval (1s) to reduce perceived latency when SignalR is unavailable.
+      ctrl.startPolling(intervalSeconds: 1);
+
+      // Also start a focused watcher that checks whether an active game
+      // exists for this room (some backends create a game but do not
+      // immediately update the public rooms list). This ensures players
+      // in the waiting room are redirected to the active game promptly.
+      _roomWatcherTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+        try {
+          // First refresh the room info from the lobby so we pick up any
+          // server-side updates such as `status` or `gameId`.
+          final lobby = Provider.of<LobbyController>(context, listen: false);
+          final refreshed = await lobby.getRoomById(widget.roomId);
+          if (refreshed != null) {
+            // If the room has an explicit game id or status changed to in-game,
+            // try to load the game by id first (preferred), otherwise probe
+            // using loadGameByRoom as a fallback.
+            final gid = refreshed.gameId;
+            if (gid != null && gid.isNotEmpty) {
+              final ok = await gameCtrl.loadGame(gid);
+              if (ok && gameCtrl.game != null) {
+                // Wait briefly for players to be present; sometimes the
+                // server creates the game record before populating players.
+                bool ready = false;
+                for (int attempt = 0; attempt < 5; attempt++) {
+                  if (gameCtrl.game != null && gameCtrl.game!.players.isNotEmpty) { ready = true; break; }
+                  await Future.delayed(const Duration(milliseconds: 400));
+                  try { await gameCtrl.loadGame(gid); } catch (_) {}
+                }
+                if (!mounted) return;
+                if (!ready && (gameCtrl.game == null || gameCtrl.game!.players.isEmpty)) {
+                  // If still not ready, inform user and continue watching
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Esperando a que se sincronicen los jugadores...')));
+                  return;
+                }
+                _roomWatcherTimer?.cancel();
+                Navigator.pushReplacementNamed(context, '/game/${gameCtrl.game!.id}');
+                return;
+              }
+            }
+            if (refreshed.status != null && refreshed.status!.toLowerCase().contains('ingame')) {
+              final found = await gameCtrl.loadGameByRoom(widget.roomId);
+              if (found && gameCtrl.game != null) {
+                bool ready = false;
+                for (int attempt = 0; attempt < 5; attempt++) {
+                  if (gameCtrl.game != null && gameCtrl.game!.players.isNotEmpty) { ready = true; break; }
+                  await Future.delayed(const Duration(milliseconds: 400));
+                  try { await gameCtrl.loadGameByRoom(widget.roomId); } catch (_) {}
+                }
+                if (!mounted) return;
+                if (!ready && (gameCtrl.game == null || gameCtrl.game!.players.isEmpty)) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Esperando a que se sincronicen los jugadores...')));
+                  return;
+                }
+                _roomWatcherTimer?.cancel();
+                Navigator.pushReplacementNamed(context, '/game/${gameCtrl.game!.id}');
+                return;
+              }
+            }
+          }
+          // Final attempt: probe the game endpoint directly by room id
+          final found = await gameCtrl.loadGameByRoom(widget.roomId);
+          if (found && gameCtrl.game != null) {
+            if (!mounted) return;
+            _roomWatcherTimer?.cancel();
+            Navigator.pushReplacementNamed(context, '/game/${gameCtrl.game!.id}');
+            return;
+          }
+        } catch (e) {
+          // keep watching; log for debugging
+          try { final s = e.toString();  print('WaitingRoom watcher error: $s'); } catch (_) {}
+        }
+      });
 
       await _ensureJoinedIfNeeded();
     });
@@ -76,15 +149,32 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
       // Refresh room info first
       final r = await lobby.getRoomById(widget.roomId);
       if (r == null) return;
-      if (username.isNotEmpty && !r.playerNames.contains(username)) {
-        final ok = await lobby.joinRoom(widget.roomId);
-        if (ok) {
+      if (username.isNotEmpty && !r.playerNames.map((s) => s.trim().toLowerCase()).contains(username.trim().toLowerCase())) {
+        // Try to join up to a few times — some servers are eventually consistent
+        bool joined = false;
+        String? lastErr;
+        for (int attempt = 0; attempt < 4 && !joined; attempt++) {
+          try {
+            final ok = await lobby.joinRoom(widget.roomId);
+            if (ok) {
+              joined = true;
+              break;
+            }
+            lastErr = lobby.error;
+          } catch (e) {
+            lastErr = e.toString();
+          }
+          // Refresh room info before retrying
+          try { await lobby.getRoomById(widget.roomId); } catch (_) {}
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+        if (joined) {
           await lobby.getRoomById(widget.roomId);
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You were added to the room.')));
         } else {
           if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Auto-join failed: ${lobby.error}')));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Auto-join failed: ${lastErr ?? lobby.error}')));
         }
       }
     } catch (_) {}
@@ -95,6 +185,7 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
     try {
       final ctrl = Provider.of<LobbyController>(context, listen: false);
       ctrl.stopPolling();
+      _roomWatcherTimer?.cancel();
     } catch (_) {}
     super.dispose();
   }
@@ -269,23 +360,72 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
                                     if (room.gameId != null && room.gameId!.isNotEmpty) {
                                       final ok = await gameCtrl.loadGame(room.gameId!);
                                       if (ok && gameCtrl.game != null) {
-                                        if (!mounted) return;
-                                        Navigator.pushReplacementNamed(context, '/game/${gameCtrl.game!.id}');
-                                        return;
+                                        // Verify local player is present on the server-side game
+                                        final prefs = Provider.of<AuthController>(context, listen: false);
+                                        final localName = prefs.username ?? '';
+                                        bool present = gameCtrl.game!.players.any((p) => p.username.trim().toLowerCase() == localName.trim().toLowerCase());
+                                        if (!present) {
+                                          // Try to join the lobby room and also attempt to attach
+                                          // to the existing game via `createOrJoinGame` which some
+                                          // backends use to add an existing room player into the
+                                          // active game. Retry a few times to handle eventual consistency.
+                                          final lobby = Provider.of<LobbyController>(context, listen: false);
+                                          for (int attempt = 0; attempt < 4 && !present; attempt++) {
+                                            try { await lobby.joinRoom(widget.roomId); } catch (_) {}
+                                            try { await lobby.getRoomById(widget.roomId); } catch (_) {}
+                                            // Attempt to join the game explicitly (safe: server may
+                                            // return existing game or add player to it).
+                                            try { await gameCtrl.createOrJoinGame(roomId: widget.roomId); } catch (_) {}
+                                            try { await gameCtrl.loadGame(room.gameId!); } catch (_) {}
+                                            if (gameCtrl.game != null) {
+                                              present = gameCtrl.game!.players.any((p) => p.username.trim().toLowerCase() == localName.trim().toLowerCase());
+                                            }
+                                            if (present) break;
+                                            await Future.delayed(const Duration(milliseconds: 500));
+                                          }
+                                        }
+
+                                        if (present) {
+                                          if (!mounted) return;
+                                          Navigator.pushReplacementNamed(context, '/game/${gameCtrl.game!.id}');
+                                          return;
+                                        }
                                       }
                                     }
 
                                     // Try loading by roomId (some backends use the same id)
                                     final tryByRoom = await gameCtrl.loadGameByRoom(widget.roomId);
                                     if (tryByRoom && gameCtrl.game != null) {
-                                      if (!mounted) return;
-                                      Navigator.pushReplacementNamed(context, '/game/${gameCtrl.game!.id}');
-                                      return;
+                                      // Verify presence similarly
+                                      final prefs = Provider.of<AuthController>(context, listen: false);
+                                      final localName = prefs.username ?? '';
+                                      bool present = gameCtrl.game!.players.any((p) => p.username.trim().toLowerCase() == localName.trim().toLowerCase());
+                                      if (!present) {
+                                        final lobby = Provider.of<LobbyController>(context, listen: false);
+                                        for (int attempt = 0; attempt < 4 && !present; attempt++) {
+                                          try { await lobby.joinRoom(widget.roomId); } catch (_) {}
+                                          try { await lobby.getRoomById(widget.roomId); } catch (_) {}
+                                          // Try to attach to the active game if server requires
+                                          // an explicit game join action.
+                                          try { await gameCtrl.createOrJoinGame(roomId: widget.roomId); } catch (_) {}
+                                          try { await gameCtrl.loadGameByRoom(widget.roomId); } catch (_) {}
+                                          if (gameCtrl.game != null) {
+                                            present = gameCtrl.game!.players.any((p) => p.username.trim().toLowerCase() == localName.trim().toLowerCase());
+                                          }
+                                          if (present) break;
+                                          await Future.delayed(const Duration(milliseconds: 500));
+                                        }
+                                      }
+                                      if (present) {
+                                        if (!mounted) return;
+                                        Navigator.pushReplacementNamed(context, '/game/${gameCtrl.game!.id}');
+                                        return;
+                                      }
                                     }
 
-                                    // If we couldn't find a game for this room, inform the user
+                                    // If we couldn't find a game for this room or local user isn't in it, inform the user
                                     if (!mounted) return;
-                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(gameCtrl.error ?? 'No active game found for this room.')));
+                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(gameCtrl.error ?? 'No active game found for this room or you are not in the game yet.')));
                                   } catch (e) {
                                     if (!mounted) return;
                                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Enter game failed: ${e.toString()}')));
@@ -314,16 +454,60 @@ class _WaitingRoomPageState extends State<WaitingRoomPage> {
                                       return;
                                     }
 
-                                    final ok = await gameCtrl.createOrJoinGame(roomId: widget.roomId);
-                                    if (ok && gameCtrl.game != null) {
-                                      final id = gameCtrl.game!.id;
-                                      if (!mounted) return;
-                                      Navigator.pushReplacementNamed(context, '/game/$id');
-                                    } else {
-                                      final err = gameCtrl.error ?? 'Failed to create game';
-                                      if (!mounted) return;
-                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
-                                    }
+                                      // Try to create/join the game. If the server complains
+                                      // about player counts, refresh the room a few times
+                                      // and retry briefly to handle eventual consistency.
+                                      bool created = false;
+                                      String? lastErr;
+                                      for (int attempt = 0; attempt < 4 && !created; attempt++) {
+                                        final ok = await gameCtrl.createOrJoinGame(roomId: widget.roomId);
+                                        if (ok && gameCtrl.game != null) {
+                                          created = true;
+                                          break;
+                                        }
+                                        lastErr = gameCtrl.error;
+                                        // If server indicates missing players, refresh room and wait
+                                        if (lastErr != null && lastErr.toLowerCase().contains('need at least')) {
+                                          await lobby.getRoomById(widget.roomId);
+                                          await Future.delayed(const Duration(milliseconds: 600));
+                                          continue;
+                                        }
+                                        // For other errors, don't retry aggressively
+                                        break;
+                                      }
+                                      if (created && gameCtrl.game != null) {
+                                        // Ensure local player is present in the server game
+                                        final prefs = Provider.of<AuthController>(context, listen: false);
+                                        final localName = prefs.username ?? '';
+                                        bool present = false;
+                                        // Try a few short retries to wait for server to include the player
+                                        for (int check = 0; check < 6 && !present; check++) {
+                                          try {
+                                            // Refresh room and attempt to load the game by room
+                                            await lobby.getRoomById(widget.roomId);
+                                            await gameCtrl.loadGameByRoom(widget.roomId);
+                                          } catch (_) {}
+                                          if (gameCtrl.game != null) {
+                                            present = gameCtrl.game!.players.any((p) => (p.username.trim().toLowerCase() == localName.trim().toLowerCase()));
+                                          }
+                                          if (present) break;
+                                          await Future.delayed(const Duration(milliseconds: 500));
+                                        }
+                                        if (!present) {
+                                          // If still not present, show error so user knows join may have failed
+                                          if (!mounted) return;
+                                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No se pudo confirmar que estés en la partida. Intenta entrar manualmente.')));
+                                        } else {
+                                          final id = gameCtrl.game!.id;
+                                          if (!mounted) return;
+                                          Navigator.pushReplacementNamed(context, '/game/$id');
+                                          return;
+                                        }
+                                      } else {
+                                        final err = gameCtrl.error ?? lastErr ?? 'Failed to create game';
+                                        if (!mounted) return;
+                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+                                      }
                                   },
                           ),
                         ],

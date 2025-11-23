@@ -1,4 +1,4 @@
-import 'player_state_dto.dart';
+﻿import 'player_state_dto.dart';
 import 'snake_dto.dart';
 import 'ladder_dto.dart';
 
@@ -107,3 +107,4 @@ class GameStateDto {
     );
   }
 }
+

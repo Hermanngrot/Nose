@@ -1,4 +1,6 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'dart:async';
+import 'dart:math';
+import 'package:flutter/material.dart';
 import '../../../core/models/player_state_dto.dart';
 import '../../../core/models/snake_dto.dart';
 import '../../../core/models/ladder_dto.dart';
@@ -8,13 +10,70 @@ class GameBoardWidget extends StatefulWidget {
   final List<SnakeDto> snakes;
   final List<LadderDto> ladders;
   final int size; // number of tiles per side (10 => 100)
-  const GameBoardWidget({super.key, required this.players, this.snakes = const [], this.ladders = const [], this.size = 10});
+  // Optional animation request: animate a specific player visually by steps
+  final String? animatePlayerId;
+  final int? animateSteps;
+  final VoidCallback? onAnimationComplete;
+
+  const GameBoardWidget({
+    super.key,
+    required this.players,
+    this.snakes = const [],
+    this.ladders = const [],
+    this.size = 10,
+    this.animatePlayerId,
+    this.animateSteps,
+    this.onAnimationComplete,
+  });
 
   @override
   State<GameBoardWidget> createState() => _GameBoardWidgetState();
 }
 
 class _GameBoardWidgetState extends State<GameBoardWidget> {
+  bool _isAnimating = false;
+  int _animatedTileIndex = 0;
+  int _animStartPos = 0;
+  int _animPlayerIndex = -1;
+  Timer? _animTimer;
+
+  @override
+  void didUpdateWidget(covariant GameBoardWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Start animation when a new request appears and we're not already animating
+    if (widget.animatePlayerId != null && widget.animateSteps != null && !_isAnimating) {
+      final idx = widget.players.indexWhere((p) => p.id == widget.animatePlayerId);
+      if (idx < 0) return;
+      _animPlayerIndex = idx;
+      _animStartPos = widget.players[idx].position;
+      _animatedTileIndex = _animStartPos;
+      _isAnimating = true;
+      int remaining = widget.animateSteps!;
+      // step interval
+      const stepMs = 300;
+      _animTimer?.cancel();
+      _animTimer = Timer.periodic(const Duration(milliseconds: stepMs), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        if (remaining <= 0) {
+          t.cancel();
+          _isAnimating = false;
+          // reset animated index so overlay hides (keep it at 0)
+          setState(() {
+            _animatedTileIndex = 0;
+          });
+          if (widget.onAnimationComplete != null) widget.onAnimationComplete!();
+          return;
+        }
+        remaining -= 1;
+        setState(() {
+          _animatedTileIndex = min(_animatedTileIndex + 1, widget.size * widget.size);
+        });
+      });
+    }
+  }
   Color _playerColor(int idx) {
     const palette = [
       Colors.red,
@@ -129,6 +188,11 @@ class _GameBoardWidgetState extends State<GameBoardWidget> {
                         double top = center.dy - tokenSize / 2;
                         left = left.clamp(0.0, boardPx - tokenSize);
                         top = top.clamp(0.0, boardPx - tokenSize);
+                        // If we are animating this player, skip drawing the regular token
+                        if (_isAnimating && _animPlayerIndex == idx) {
+                          return const SizedBox.shrink();
+                        }
+
                         return Positioned(
                           left: left.toDouble(),
                           top: top.toDouble(),
@@ -154,6 +218,42 @@ class _GameBoardWidgetState extends State<GameBoardWidget> {
                         );
                       }).toList(),
 
+                      // Animated overlay token (visual-only) when requested
+                      if (_isAnimating && _animPlayerIndex >= 0 && _animatedTileIndex > 0)
+                        Builder(builder: (ctx) {
+                          // compute overlay position based on _animatedTileIndex
+                          final overlayCenter = _tileCenter(_animatedTileIndex, tileSize, widget.size);
+                          final tokenSize = (tileSize * 0.36).clamp(14.0, tileSize * 0.7);
+                          double left = overlayCenter.dx - tokenSize / 2;
+                          double top = overlayCenter.dy - tokenSize / 2;
+                          left = left.clamp(0.0, boardPx - tokenSize);
+                          top = top.clamp(0.0, boardPx - tokenSize);
+                          final player = widget.players[_animPlayerIndex];
+                          return Positioned(
+                            left: left,
+                            top: top,
+                            width: tokenSize,
+                            height: tokenSize,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 180),
+                              curve: Curves.easeInOut,
+                              child: Tooltip(
+                                message: player.username,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: _playerColor(_animPlayerIndex).withOpacity(0.95),
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: Colors.white, width: 2),
+                                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 6, offset: const Offset(0, 3))],
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(player.username.isNotEmpty ? player.username[0].toUpperCase() : '?', style: TextStyle(color: Colors.white, fontSize: (tokenSize * 0.45).clamp(12.0, 18.0), fontWeight: FontWeight.bold)),
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+
                       // Labels
                       const Positioned(left: 8, bottom: 8, child: Text('Start: 1', style: TextStyle(fontSize: 12))),
                       Positioned(right: 8, top: 8, child: Text('Finish: ${widget.size * widget.size}', style: const TextStyle(fontSize: 12))),
@@ -166,5 +266,11 @@ class _GameBoardWidgetState extends State<GameBoardWidget> {
         );
       }),
     );
+  }
+
+  @override
+  void dispose() {
+    _animTimer?.cancel();
+    super.dispose();
   }
 }

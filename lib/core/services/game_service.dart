@@ -1,5 +1,5 @@
 import '../api_client.dart';
-import '../models/game_state_dto.dart';
+import '../models/game_state_dto_clean.dart';
 import 'dart:developer' as developer;
 
 class GameService {

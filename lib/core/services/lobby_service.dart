@@ -18,7 +18,13 @@ class LobbyService {
       data = resp;
     }
     if (data is List) {
-      return data.map((e) => RoomSummaryDto.fromJson(Map<String, dynamic>.from(e as Map))).toList();
+      final list = data.map((e) => RoomSummaryDto.fromJson(Map<String, dynamic>.from(e as Map))).toList();
+      try {
+        for (final r in list) {
+          developer.log('LobbyService.getRooms: parsed room id=${r.id} players=${r.playerNames}', name: 'LobbyService');
+        }
+      } catch (_) {}
+      return list;
     }
     return [];
   }
@@ -77,7 +83,11 @@ class LobbyService {
     developer.log('LobbyService.getRoom: GET /api/Lobby/rooms/$roomId', name: 'LobbyService');
     final resp = await _client.getJson('/api/Lobby/rooms/$roomId');
     developer.log('LobbyService.getRoom: response: $resp', name: 'LobbyService');
-    if (resp is Map) return RoomSummaryDto.fromJson(Map<String, dynamic>.from(resp));
+    if (resp is Map) {
+      final dto = RoomSummaryDto.fromJson(Map<String, dynamic>.from(resp));
+      try { developer.log('LobbyService.getRoom: parsed room id=${dto.id} playerNames=${dto.playerNames}', name: 'LobbyService'); } catch (_) {}
+      return dto;
+    }
     throw Exception('Unexpected getRoom response: ${resp.runtimeType}');
   }
 }

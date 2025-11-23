@@ -31,6 +31,7 @@ class App extends StatelessWidget {
       ],
       child: MaterialApp(
         title: 'Profesores y Matones',
+        debugShowCheckedModeBanner: false,
         theme: AppTheme.theme,
         initialRoute: '/login',
         routes: {

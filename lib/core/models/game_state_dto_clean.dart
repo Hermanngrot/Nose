@@ -9,39 +9,29 @@ class GameStateDto {
   final List<SnakeDto> snakes;
   final List<LadderDto> ladders;
 
-  GameStateDto({
-    required this.id,
-    required this.players,
-    required this.status,
-    List<SnakeDto>? snakes,
-    List<LadderDto>? ladders,
-  })  : snakes = snakes ?? [],
+  GameStateDto({required this.id, required this.players, required this.status, List<SnakeDto>? snakes, List<LadderDto>? ladders})
+      : snakes = snakes ?? [],
         ladders = ladders ?? [];
 
   factory GameStateDto.fromJson(Map<String, dynamic> json) {
     final dynamic playersRawDyn = json['players'] ?? json['Players'] ?? json['playersList'] ?? json['playersData'];
     List<dynamic> playersRaw = [];
-    if (playersRawDyn is List) {
-      playersRaw = playersRawDyn;
-    } else if (playersRawDyn is Map) {
-      playersRaw = playersRawDyn.values.toList();
-    }
+    if (playersRawDyn is List) playersRaw = playersRawDyn;
+    else if (playersRawDyn is Map) playersRaw = playersRawDyn.values.toList();
 
-    final players = playersRaw
-        .map((e) => PlayerStateDto.fromJson(e is Map<String, dynamic> ? e : Map<String, dynamic>.from(e)))
-        .toList();
+    final players = playersRaw.map((e) => PlayerStateDto.fromJson(e as Map<String, dynamic>)).toList();
 
-    final boardRaw = (json['board'] ?? json['Board']) as Map<String, dynamic>?;
+    final boardRaw = json['board'] as Map<String, dynamic>? ?? json['Board'] as Map<String, dynamic>?;
 
     List<SnakeDto> parseSnakes(dynamic raw) {
       if (raw == null) return [];
-      if (raw is List) return raw.map((e) => SnakeDto.fromJson(Map<String, dynamic>.from(e))).toList();
+      if (raw is List) return raw.map((e) => SnakeDto.fromJson(e as Map<String, dynamic>)).toList();
       return [];
     }
 
     List<LadderDto> parseLadders(dynamic raw) {
       if (raw == null) return [];
-      if (raw is List) return raw.map((e) => LadderDto.fromJson(Map<String, dynamic>.from(e))).toList();
+      if (raw is List) return raw.map((e) => LadderDto.fromJson(e as Map<String, dynamic>)).toList();
       return [];
     }
 
@@ -59,18 +49,10 @@ class GameStateDto {
         final adjusted = players.map((p) {
           final matchById = normId.isNotEmpty && p.id.toString().trim() == normId;
           final matchByName = normName.isNotEmpty && p.username.trim().toLowerCase() == normName;
-          if (matchById || matchByName) {
-            return PlayerStateDto(id: p.id, username: p.username, position: p.position, isTurn: true);
-          }
+          if (matchById || matchByName) return PlayerStateDto(id: p.id, username: p.username, position: p.position, isTurn: true);
           return PlayerStateDto(id: p.id, username: p.username, position: p.position, isTurn: p.isTurn);
         }).toList();
-        return GameStateDto(
-          id: (json['id'] ?? json['gameId'])?.toString() ?? '',
-          players: adjusted,
-          status: (json['status'] ?? json['gameStatus'])?.toString() ?? 'unknown',
-          snakes: snakes,
-          ladders: ladders,
-        );
+        return GameStateDto(id: (json['id'] ?? json['gameId'])?.toString() ?? '', players: adjusted, status: json['status'] as String? ?? 'unknown', snakes: snakes, ladders: ladders);
       }
 
       final dynamic idxRaw = json['currentPlayerIndex'] ?? json['currentTurnIndex'] ?? json['currentIndex'] ?? json['turn'] ?? json['currentTurn'];
@@ -81,29 +63,17 @@ class GameStateDto {
         else if (idxRaw is double) idx = idxRaw.toInt();
 
         if (idx != null && players.isNotEmpty) {
-          if (idx > 0 && idx <= players.length) idx = idx - 1; // normalize 1-based
+          if (idx > 0 && idx <= players.length) idx = idx - 1;
           if (idx >= 0 && idx < players.length) {
             final adjusted = List<PlayerStateDto>.from(players);
             final p = adjusted[idx];
             adjusted[idx] = PlayerStateDto(id: p.id, username: p.username, position: p.position, isTurn: true);
-            return GameStateDto(
-              id: (json['id'] ?? json['gameId'])?.toString() ?? '',
-              players: adjusted,
-              status: (json['status'] ?? json['gameStatus'])?.toString() ?? 'unknown',
-              snakes: snakes,
-              ladders: ladders,
-            );
+            return GameStateDto(id: (json['id'] ?? json['gameId'])?.toString() ?? '', players: adjusted, status: json['status'] as String? ?? 'unknown', snakes: snakes, ladders: ladders);
           }
         }
       }
     }
 
-    return GameStateDto(
-      id: (json['id'] ?? json['gameId'])?.toString() ?? '',
-      players: players,
-      status: (json['status'] ?? json['gameStatus'])?.toString() ?? 'unknown',
-      snakes: snakes,
-      ladders: ladders,
-    );
+    return GameStateDto(id: (json['id'] ?? json['gameId'])?.toString() ?? '', players: players, status: json['status'] as String? ?? 'unknown', snakes: snakes, ladders: ladders);
   }
 }
