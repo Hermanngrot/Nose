@@ -23,6 +23,9 @@ class GameController extends ChangeNotifier {
   int _opCounter = 0;
   // Polling timer used when SignalR is not available to keep game state in sync
   Timer? _gamePollTimer;
+  // Adaptive polling state
+  int _pollFastCyclesRemaining = 0;
+  int _pollIntervalSeconds = 1;
   // Watchdog timer: when we ask server to perform a move via SignalR, if no
   // MoveCompleted arrives within this timeout we proactively refresh from REST
   // to avoid clients staying out-of-sync when websockets are unreliable.
@@ -128,6 +131,27 @@ class GameController extends ChangeNotifier {
       final g = await _gameService.getGame(gameId);
       if (op != _opCounter) return false; // stale
       game = g;
+      // If the server returned a game but with empty players (common when
+      // auth token wasn't available during startup on web), retry a few
+      // times with a short delay before giving up to avoid entering polling
+      // due to a transient partial response.
+      try {
+        if (game != null && (game!.players.isEmpty)) {
+          const int maxRetries = 6;
+          int attempt = 0;
+          while (attempt < maxRetries && game != null && game!.players.isEmpty && op == _opCounter) {
+            await Future.delayed(const Duration(milliseconds: 350));
+            try {
+              final refreshed = await _gameService.getGame(gameId);
+              if (refreshed != null) game = refreshed;
+            } catch (_) {}
+            attempt++;
+          }
+          if (game != null && game!.players.isEmpty) {
+            developer.log('loadGame: players remained empty after retries for game=$gameId', name: 'GameController');
+          }
+        }
+      } catch (_) {}
       try {
         developer.log('Loaded game ${game?.id} players=${game?.players.map((p) => '${p.username}:${p.isTurn}').toList()}', name: 'GameController');
       } catch (_) {}
@@ -378,21 +402,48 @@ class GameController extends ChangeNotifier {
   void _startGamePolling() {
     try {
       _gamePollTimer?.cancel();
-      _gamePollTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      // Start with a fast polling interval for a few cycles, then back off
+      _pollIntervalSeconds = 1;
+      _pollFastCyclesRemaining = 6;
+      _gamePollTimer = Timer.periodic(Duration(seconds: _pollIntervalSeconds), (t) async {
         try {
           if (game == null) return;
           if (_shouldIgnoreIncomingUpdates()) return;
           final fresh = await _gameService.getGame(game!.id);
           // avoid applying stale data when op counter changed
-          // Prevent overwriting a locally-populated game with an empty
-          // or partially-initialized server response (some backends may
-          // briefly return an empty players list while creating the game).
           final bool keepLocal = (game != null && game!.players.isNotEmpty && fresh.players.isEmpty);
           if (keepLocal) {
             developer.log('Polling: skipping applying server game with empty players to avoid losing local state', name: 'GameController');
           } else {
             game = fresh;
             notifyListeners();
+          }
+        } catch (_) {}
+        // Backoff logic: after fast cycles, restart timer with a slower interval
+        try {
+          if (_pollFastCyclesRemaining > 0) {
+            _pollFastCyclesRemaining--;
+            if (_pollFastCyclesRemaining == 0) {
+              // restart with slower cadence
+              t.cancel();
+              try {
+                _pollIntervalSeconds = 4; // slower after warm-up
+                _gamePollTimer = Timer.periodic(Duration(seconds: _pollIntervalSeconds), (t2) async {
+                  try {
+                    if (game == null) return;
+                    if (_shouldIgnoreIncomingUpdates()) return;
+                    final fresh = await _gameService.getGame(game!.id);
+                    final bool keepLocal = (game != null && game!.players.isNotEmpty && fresh.players.isEmpty);
+                    if (keepLocal) {
+                      developer.log('Polling: skipping applying server game with empty players to avoid losing local state', name: 'GameController');
+                    } else {
+                      game = fresh;
+                      notifyListeners();
+                    }
+                  } catch (_) {}
+                });
+              } catch (_) {}
+            }
           }
         } catch (_) {}
       });
