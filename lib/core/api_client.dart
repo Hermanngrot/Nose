@@ -12,6 +12,8 @@ class ApiClient {
   // Store last request/response summary for diagnostics (useful in web builds)
   static String? lastRequestSummary;
   static String? lastResponseSummary;
+  // Store last response headers for diagnostics / Location fallback
+  static Map<String, String>? lastResponseHeaders;
 
   ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? apiBaseUrl;
 
@@ -23,7 +25,8 @@ class ApiClient {
     lastRequestSummary = 'GET $uri headers=${headers.toString()}';
     final resp = await http.get(uri, headers: headers).timeout(const Duration(seconds: 10));
     developer.log('Response ${resp.statusCode}: ${resp.body}', name: 'ApiClient');
-    lastResponseSummary = 'Status ${resp.statusCode} body=${resp.body}';
+    lastResponseHeaders = Map<String, String>.from(resp.headers);
+    lastResponseSummary = 'Status ${resp.statusCode} headers=${resp.headers.toString()} body=${resp.body}';
     return _handleResponse(resp);
   }
 
@@ -36,7 +39,8 @@ class ApiClient {
     lastRequestSummary = 'POST $uri headers=${headers.toString()} body=${jsonEncode(body)}';
     final resp = await http.post(uri, headers: headers, body: jsonEncode(body)).timeout(const Duration(seconds: 12));
     developer.log('Response ${resp.statusCode}: ${resp.body}', name: 'ApiClient');
-    lastResponseSummary = 'Status ${resp.statusCode} body=${resp.body}';
+    lastResponseHeaders = Map<String, String>.from(resp.headers);
+    lastResponseSummary = 'Status ${resp.statusCode} headers=${resp.headers.toString()} body=${resp.body}';
     return _handleResponse(resp);
   }
 

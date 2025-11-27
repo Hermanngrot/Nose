@@ -4,13 +4,19 @@ class PlayerStateDto {
   final int position;
   final bool isTurn;
 
-  PlayerStateDto({required this.id, required this.username, required this.position, required this.isTurn});
+  PlayerStateDto({
+    required this.id,
+    required this.username,
+    required this.position,
+    required this.isTurn,
+  });
 
   factory PlayerStateDto.fromJson(Map<String, dynamic> json) {
     bool parseBool(dynamic v) {
       if (v == null) return false;
       if (v is bool) return v;
       if (v is int) return v != 0;
+      if (v is double) return v != 0.0;
       if (v is String) {
         final s = v.trim().toLowerCase();
         return s == 'true' || s == '1' || s == 'yes';
@@ -18,13 +24,22 @@ class PlayerStateDto {
       return false;
     }
 
-    final dynamic isTurnRaw = json['isTurn'] ?? json['turn'] ?? json['isCurrent'] ?? json['current'] ?? json['active'] ?? json['hasTurn'] ?? json['isPlaying'];
+    dynamic isTurnRaw = json['isCurrentTurn'] ??
+        json['isTurn'] ??
+        json['turn'] ??
+        json['current'] ??
+        json['active'];
 
-    String idVal = (json['id'] ?? json['playerId'])?.toString() ?? '';
-    String usernameVal = (json['username'] ?? json['name'] ?? '').toString();
+    // BACKEND ALWAYS USES playerId
+    final String idVal = (json['playerId'] ?? json['id'])?.toString() ?? '';
+
+    final String usernameVal =
+        (json['username'] ?? json['name'] ?? json['user'] ?? '')
+            .toString()
+            .trim();
 
     int positionVal = 0;
-    final dynamic posRaw = json['position'] ?? json['pos'] ?? json['posicion'];
+    final posRaw = json['position'] ?? json['pos'] ?? json['posicion'];
     if (posRaw is int) {
       positionVal = posRaw;
     } else if (posRaw is double) {
