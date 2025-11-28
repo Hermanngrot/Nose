@@ -1260,7 +1260,92 @@ class GameController extends ChangeNotifier {
           name: 'GameController');
     }
   }
+Future<MoveResultDto?> answerProfesor(String questionId, String answer) async {
+  if (game == null) return null;
 
+  answering = true;
+  notifyListeners();
+
+  try {
+    final gid = int.tryParse(game!.id) ?? 0;
+
+    // 1️⃣ Intentar por SignalR (correcto)
+    if (_signalR.isConnected || signalRAvailable) {
+      final sent = await answerProfesorBySignalR(answer);
+
+      if (sent) {
+        developer.log(
+          "Profesor answer sent by SignalR",
+          name: "GameController"
+        );
+        // MoveCompleted llegará por el evento → no devolver nada
+        return null;
+      }
+    }
+
+    // 2️⃣ Fallback REST si SignalR falló
+    developer.log(
+      "SignalR failed → using REST fallback",
+      name: "GameController"
+    );
+
+    final res = await _moveService.answerProfesor(
+      game!.id,
+      questionId,
+      answer,
+    );
+
+    lastMoveResult = res;
+    lastMoveSimulated = false;
+
+    await loadGame(game!.id);
+
+    return res;
+
+  } catch (e) {
+    error = e.toString();
+    notifyListeners();
+    return null;
+
+  } finally {
+    answering = false;
+    notifyListeners();
+  }
+}
+
+  void clearCurrentQuestion() {
+    currentQuestion = null;
+    notifyListeners();
+  }
+
+  void setAnswering(bool v) {
+    answering = v;
+    notifyListeners();
+  }
+  Future<bool> answerProfesorBySignalR(String answer) async {
+  if (game == null) return false;
+
+  try {
+    final gid = int.tryParse(game!.id) ?? 0;
+    if (gid <= 0) throw Exception("Invalid gameId");
+
+    await _signalR.invoke(
+      "AnswerProfesorQuestion",
+      args: [gid, answer],
+    );
+
+    answering = false;
+    notifyListeners();
+    return true;
+
+  } catch (e) {
+    developer.log(
+      "answerProfesorBySignalR failed: $e",
+      name: "GameController"
+    );
+    return false;
+  }
+}
   // ==========================================================
   // PROFESOR API
   // ==========================================================
@@ -1276,35 +1361,8 @@ class GameController extends ChangeNotifier {
     }
   }
 
-  Future<MoveResultDto?> answerProfesor(String questionId, String answer) async {
-    if (game == null) return null;
-    answering = true;
-    notifyListeners();
-    try {
-      final res = await _moveService.answerProfesor(game!.id, questionId, answer);
-      lastMoveResult = res;
-      lastMoveSimulated = false;
-      await loadGame(game!.id);
-      return res;
-    } catch (e) {
-      error = e.toString();
-      notifyListeners();
-      return null;
-    } finally {
-      answering = false;
-      notifyListeners();
-    }
-  }
+  
 
-  void clearCurrentQuestion() {
-    currentQuestion = null;
-    notifyListeners();
-  }
-
-  void setAnswering(bool v) {
-    answering = v;
-    notifyListeners();
-  }
 
   // ==========================================================
   // SURRENDER
