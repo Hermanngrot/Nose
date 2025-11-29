@@ -619,8 +619,16 @@ class GameController extends ChangeNotifier {
 
             _cancelWaitingForMoveWatch();
             waitingForMove = false;
+            
+            // Si hay un dado válido, solo notificar sin actualizar estado
+            // La animación del dado se mostrará primero, luego se actualizará el estado
+            if (lastMoveResult != null && lastMoveResult!.diceValue > 0) {
+              notifyListeners();
+              // NO llamar a _refreshPlayersFromServer aquí - se hará después de la animación del dado
+              return;
+            }
+            
             notifyListeners();
-
             await _refreshPlayersFromServer();
             try {
               if (lastMoveResult != null) {
@@ -845,7 +853,8 @@ class GameController extends ChangeNotifier {
           );
         } catch (_) {}
 
-        await loadGame(game!.id);
+        // NO llamar loadGame aquí - se hará después de la animación del dado
+        // await loadGame(game!.id);
 
         try {
           if (lastMoveResult != null) {
@@ -1201,8 +1210,14 @@ class GameController extends ChangeNotifier {
   // ==========================================================
   // REFRESH FROM SERVER
   // ==========================================================
+  // Método público para forzar actualización después de animación
+  Future<void> refreshAfterAnimation() async {
+    await _refreshPlayersFromServer();
+  }
+  
   Future<void> _refreshPlayersFromServer() async {
     if (game == null) return;
+    
     try {
       final fresh = await _gameService.getGame(game!.id);
 
@@ -1267,7 +1282,7 @@ class GameController extends ChangeNotifier {
   // ==========================================================
   // PROFESOR API
   // ==========================================================
-  Future<MoveResultDto?> answerProfesor(
+  Future<Map<String, dynamic>?> answerProfesor(
     String questionId,
     String answer,
   ) async {
@@ -1281,38 +1296,12 @@ class GameController extends ChangeNotifier {
       final gid = int.tryParse(game!.id) ?? 0;
       if (gid <= 0) throw Exception('Invalid game id');
 
-      // 1) Intentar por SignalR SOLO si realmente está conectado
-      bool sentBySignalR = false;
-      if (_signalR.isConnected) {
-        try {
-          await _signalR.invoke(
-            'AnswerProfesorQuestion',
-            args: [gid, answer],
-          );
-          sentBySignalR = true;
-          developer.log(
-            'Profesor answer sent by SignalR (gid=$gid, answer=$answer)',
-            name: 'GameController',
-          );
-        } catch (e) {
-          developer.log(
-            'answerProfesor: SignalR failed, will fall back to REST. Error: $e',
-            name: 'GameController',
-          );
-        }
-      }
-
-      if (sentBySignalR) {
-        // Esperamos MoveCompleted por eventos de SignalR, no devolvemos nada
-        return null;
-      }
-
-      // 2) Fallback REST
       developer.log(
-        'SignalR not usable → using REST fallback for profesor answer',
+        'Answering profesor: gameId=$gid, questionId=$questionId, answer=$answer',
         name: 'GameController',
       );
 
+      // Llamada REST al backend
       final res = await _moveService.answerProfesor(
         game!.id,
         questionId,
@@ -1321,16 +1310,42 @@ class GameController extends ChangeNotifier {
 
       lastMoveResult = res;
       lastMoveSimulated = false;
+      
+      // Setear lastMovePlayerId para que se anime
+      try {
+        final currentPlayer = game!.players.firstWhere((p) => p.isTurn);
+        lastMovePlayerId = currentPlayer.id;
+      } catch (_) {
+        lastMovePlayerId = null;
+      }
 
-      await loadGame(game!.id);
+      // Retornar información del resultado INMEDIATAMENTE
+      final result = {
+        'success': true,
+        'moveResult': res,
+      };
 
-      return res;
+      // Recargar estado del juego SIN BLOQUEAR (fire and forget)
+      loadGame(game!.id).catchError((e) {
+        developer.log(
+          'Background loadGame after profesor answer failed: $e',
+          name: 'GameController',
+        );
+        return false;
+      });
+
+      return result;
     } catch (e) {
+      developer.log(
+        'Error answering profesor: ${e.toString()}',
+        name: 'GameController',
+      );
       error = e.toString();
       notifyListeners();
-      return null;
+      return {'success': false, 'error': e.toString()};
     } finally {
       answering = false;
+      currentQuestion = null;
       notifyListeners();
     }
   }

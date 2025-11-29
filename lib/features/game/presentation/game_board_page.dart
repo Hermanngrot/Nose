@@ -4,6 +4,7 @@
 
 import 'dart:developer' as developer;
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -12,6 +13,7 @@ import '../../auth/state/auth_controller.dart';
 import '../state/game_controller.dart';
 import 'game_board_widget.dart';
 import '../../auth/presentation/logout_button.dart';
+import '../../../core/models/profesor_question_dto.dart';
 
 class GameBoardPage extends StatefulWidget {
   final String gameId;
@@ -42,6 +44,13 @@ class _GameBoardPageState extends State<GameBoardPage>
   bool _waitingForPlayers = false;
   Timer? _aggressiveReloadTimer;
   int _aggressiveReloadAttempts = 0;
+  
+  // Track if profesor dialog is currently showing
+  bool _profesorDialogShowing = false;
+  String? _lastShownQuestionId;
+  
+  // Track if we're animating dice (to prevent auto-reload)
+  bool _animatingDice = false;
 
   @override
   void initState() {
@@ -128,55 +137,18 @@ class _GameBoardPageState extends State<GameBoardPage>
     final ctrl = Provider.of<GameController>(context);
     final bool offlineMode = !ctrl.signalRAvailable;
 
-    // Si llega pregunta → mostrar dialogo
+    // Si llega pregunta → mostrar dialogo (solo una vez por pregunta)
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (ctrl.currentQuestion != null) {
-        final q = ctrl.currentQuestion!;
-        showDialog<void>(
-          context: context,
-          barrierDismissible: false,
-          builder: (ctx) {
-            return AlertDialog(
-              title: const Text("Pregunta del profesor"),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(q.question),
-                  const SizedBox(height: 12),
-                  ...q.options.map(
-                    (opt) {
-                      final label =
-                          opt.trim().isEmpty ? "Opción" : opt; // sin "<empty>"
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: ElevatedButton(
-                          onPressed: ctrl.answering
-                              ? null
-                              : () async {
-                                  Navigator.of(ctx).pop();
-
-                                  await _submitProfesorAnswer(
-                                      q.questionId, opt, ctx);
-                                  ctrl.clearCurrentQuestion();
-                                  ctrl.setAnswering(false);
-                                },
-                          child: ctrl.answering
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2),
-                                )
-                              : Text(label),
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            );
-          },
-        );
+      if (ctrl.currentQuestion != null && 
+          !_profesorDialogShowing && 
+          _lastShownQuestionId != ctrl.currentQuestion!.questionId) {
+        _profesorDialogShowing = true;
+        _lastShownQuestionId = ctrl.currentQuestion!.questionId;
+        final question = ctrl.currentQuestion!;
+        // Limpiar INMEDIATAMENTE para evitar duplicados
+        ctrl.clearCurrentQuestion();
+        await _showProfesorQuestionDialog(question);
+        _profesorDialogShowing = false;
       }
     });
 
@@ -402,9 +374,13 @@ class _GameBoardPageState extends State<GameBoardPage>
                                           snakes: snakes,
                                           ladders: ladders,
                                           animatePlayerId:
-                                              ctrl.lastMovePlayerId,
+                                              (ctrl.lastMoveResult?.diceValue ?? 0) > 0 
+                                                  ? ctrl.lastMovePlayerId 
+                                                  : null,
                                           animateSteps:
-                                              ctrl.lastMoveResult?.diceValue,
+                                              (ctrl.lastMoveResult?.diceValue ?? 0) > 0
+                                                  ? ctrl.lastMoveResult?.diceValue
+                                                  : null,
                                           onAnimationComplete: () {
                                             if (ctrl
                                                 .hasPendingSimulatedGame()) {
@@ -901,48 +877,76 @@ class _GameBoardPageState extends State<GameBoardPage>
     final ctrl = Provider.of<GameController>(context, listen: false);
     final mr = ctrl.lastMoveResult;
     if (mr == null) return;
+    
+    // Si ya estamos animando, ignorar
+    if (_animatingDice) return;
 
-    int applied = (mr.dice >= 1 && mr.dice <= 6) ? mr.dice : mr.dice;
+    final diceValue = mr.dice;
+    if (diceValue <= 0) return; // Solo animar dados válidos
+
+    int applied = (diceValue >= 1 && diceValue <= 6) ? diceValue : diceValue;
     if (applied <= 0) applied = 1;
     if (applied > 6) applied = ((applied % 6) == 0) ? 6 : (applied % 6);
 
     _diceNumber = 1;
+    _animatingDice = true;
 
+    // Mostrar dado con animación
     setState(() => _showDice = true);
 
     await _playDiceRollAnimation(applied);
 
     if (!mounted) return;
+    
+    // Mantener el dado visible por 800ms
+    await Future.delayed(const Duration(milliseconds: 800));
+    
+    if (!mounted) return;
 
     setState(() => _showDice = false);
 
-    // Overlay Matón
-    try {
-      final newPos = mr.newPosition;
-      bool hitMaton = false;
+    _animatingDice = false;
 
-      if (ctrl.game != null) {
-        hitMaton = ctrl.game!.snakes.any((s) => s.headPosition == newPos);
-      }
-
-      if (hitMaton) {
-        _specialMessage =
-            "¡Te comió un Matón! Retrocedes a ${mr.newPosition}";
-        setState(() => _showSpecialOverlay = true);
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted) setState(() => _showSpecialOverlay = false);
-        });
-      }
-    } catch (_) {}
-
-    ctrl.lastMoveResult = null;
-
+    // AHORA actualizar el estado - esto activará la animación casilla por casilla en el GameBoardWidget
     if (ctrl.hasPendingSimulatedGame()) {
       ctrl.applyPendingSimulatedGame();
       ctrl.lastMoveSimulated = false;
-    } else if (ctrl.game != null) {
-      Future.microtask(() => ctrl.loadGame(ctrl.game!.id));
+    } else {
+      await ctrl.refreshAfterAnimation();
     }
+    
+    if (!mounted) return;
+
+    // DESPUÉS de mover, mostrar overlay de Matón si aplica
+    try {
+      final wasDiceRoll = mr.diceValue > 0;
+      
+      if (wasDiceRoll && mr.specialEvent == "Matón") {
+        final auth = Provider.of<AuthController>(context, listen: false);
+        final myUserId = auth.userId != null ? int.tryParse(auth.userId!) : null;
+        final isMyMove = (ctrl.lastMovePlayerId == myUserId);
+        
+        // Solo mostrar si encontramos el jugador
+        if (ctrl.game != null && ctrl.lastMovePlayerId != null) {
+          try {
+            final player = ctrl.game!.players.firstWhere(
+              (p) => p.id == ctrl.lastMovePlayerId,
+            );
+            
+            if (isMyMove) {
+              _specialMessage = "Te han ayudado, subes hasta la casilla ${mr.finalPosition}";
+            } else {
+              _specialMessage = "${player.username} ha sido ayudado por un matón!";
+            }
+            
+            setState(() => _showSpecialOverlay = true);
+            Future.delayed(const Duration(seconds: 3), () {
+              if (mounted) setState(() => _showSpecialOverlay = false);
+            });
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   // -------------------------------------------------------------
@@ -953,17 +957,20 @@ class _GameBoardPageState extends State<GameBoardPage>
     _diceRolling = true;
 
     try {
-      const List<int> phases = [60, 60, 60, 60, 80, 100, 140, 200];
+      final random = Random();
+      const totalDuration = 2000; // 2 segundos
+      const intervalMs = 80; // Cambiar número cada 80ms
+      final iterations = totalDuration ~/ intervalMs;
 
-      if (_diceNumber == null) _diceNumber = 1;
-
-      for (final d in phases) {
-        await Future.delayed(Duration(milliseconds: d));
+      // Mostrar números aleatorios durante 2 segundos
+      for (int i = 0; i < iterations; i++) {
+        await Future.delayed(const Duration(milliseconds: intervalMs));
         if (!mounted) return;
-        setState(() => _diceNumber = (_diceNumber! % 6) + 1);
+        setState(() => _diceNumber = random.nextInt(6) + 1);
       }
 
-      await Future.delayed(const Duration(milliseconds: 160));
+      // Mostrar el número final con animación
+      await Future.delayed(const Duration(milliseconds: 100));
       if (!mounted) return;
       setState(() => _diceNumber = finalNumber);
 
@@ -1008,57 +1015,160 @@ class _GameBoardPageState extends State<GameBoardPage>
   }
 
   // -------------------------------------------------------------
+  // DIÁLOGO DE PREGUNTA DEL PROFESOR
+  // -------------------------------------------------------------
+  Future<void> _showProfesorQuestionDialog(ProfesorQuestionDto question) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text("Pregunta del profesor"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Profesor ${question.profesor}',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const SizedBox(height: 8),
+              Text(question.question),
+              const SizedBox(height: 16),
+              ...question.options.asMap().entries.map((entry) {
+                final index = entry.key;
+                final opt = entry.value;
+                final letters = ['A', 'B', 'C', 'D'];
+                final letter = index < letters.length ? letters[index] : '${index + 1}';
+                final label = opt.trim().isEmpty ? "Opción $letter" : "$letter) $opt";
+                
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      // Cerrar diálogo INMEDIATAMENTE
+                      Navigator.of(dialogContext).pop();
+                      
+                      // Obtener la LETRA correspondiente al valor seleccionado
+                      final letterToSend = question.getLetterForValue(opt) ?? letter;
+                      
+                      // Mostrar loading en pantalla
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Row(
+                            children: [
+                              SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                ),
+                              ),
+                              SizedBox(width: 12),
+                              Text('Enviando respuesta...'),
+                            ],
+                          ),
+                          duration: Duration(seconds: 10),
+                        ),
+                      );
+                      
+                      // Enviar respuesta (SOLO LA LETRA: A, B, o C)
+                      final result = await _submitProfesorAnswer(
+                          question.questionId, letterToSend, context);
+                      
+                      // Cerrar loading y esperar un momento
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).clearSnackBars();
+                        
+                        // ESPERAR para que el diálogo termine de cerrar
+                        await Future.delayed(const Duration(milliseconds: 300));
+                        
+                        // Mostrar resultado EN EL TABLERO
+                        if (mounted && result != null && result['message'] != null) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(result['message'] as String),
+                              backgroundColor: result['isCorrect'] == true
+                                  ? Colors.green
+                                  : Colors.red,
+                              duration: const Duration(seconds: 4),
+                            ),
+                          );
+                        }
+                      }
+                    },
+                    child: Text(label),
+                  ),
+                );
+              }).toList(),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // -------------------------------------------------------------
   // ENVÍO DE RESPUESTA DEL PROFESOR
   // -------------------------------------------------------------
-  Future<void> _submitProfesorAnswer(
+  Future<Map<String, dynamic>?> _submitProfesorAnswer(
       String questionId, String answer, BuildContext ctx) async {
     final ctrl = Provider.of<GameController>(context, listen: false);
 
     try {
-      var res;
+      // answerProfesor YA maneja answering=true/false internamente
+      var res = await ctrl
+          .answerProfesor(questionId, answer)
+          .timeout(const Duration(seconds: 15));
 
-      try {
-        res = await ctrl
-            .answerProfesor(questionId, answer)
-            .timeout(const Duration(seconds: 15));
-      } on TimeoutException {
-        try {
-          res = await ctrl
-              .answerProfesor(questionId, answer)
-              .timeout(const Duration(seconds: 15));
-        } on TimeoutException {
-          if (!mounted) return;
-          await _showErrorDialog(
-            ctx,
-            "Tiempo de espera agotado",
-            "La respuesta tardó demasiado en procesarse. Intenta nuevamente.",
-          );
-          return;
-        }
+      if (!mounted) return null;
+
+      if (res == null || res['success'] != true) {
+        await _showErrorDialog(
+          ctx,
+          "Error al responder",
+          "No se pudo enviar la respuesta. Intenta nuevamente.",
+        );
+        return null;
       }
 
-      if (!mounted) return;
+      // Extraer información del resultado
+      final moveResult = res['moveResult'];
+      if (moveResult != null) {
+        final message = moveResult.message ?? 'Respuesta procesada';
+        final fromPos = moveResult.fromPosition ?? 0;
+        final finalPos = moveResult.finalPosition ?? 0;
+        
+        // Backend: "¡Correcto! Mantienes tu posición." o "Incorrecto. El profesor te hace bajar."
+        final messageText = message.toLowerCase();
+        final isCorrect = messageText.contains('correcto') || 
+                          messageText.contains('mantienes') ||
+                          (fromPos == finalPos && !messageText.contains('incorrecto'));
+        
+        return {
+          'message': message,
+          'isCorrect': isCorrect,
+          'fromPosition': fromPos,
+          'finalPosition': finalPos,
+        };
+      }
 
-      ScaffoldMessenger.of(ctx).showSnackBar(
-        SnackBar(
-          content: Text(
-            res != null
-                ? "Respuesta enviada"
-                : "No se pudo enviar la respuesta",
-          ),
-        ),
-      );
+      return {'message': 'Respuesta enviada', 'isCorrect': true};
     } catch (e) {
       developer.log(
         "Error al enviar respuesta del profesor: $e",
         name: "GameBoardPage",
       );
-      if (!mounted) return;
+      if (!mounted) return null;
       await _showErrorDialog(
         ctx,
         "Error al responder",
         "Ocurrió un problema al enviar la respuesta. Intenta nuevamente.",
       );
+      return null;
     }
   }
 
