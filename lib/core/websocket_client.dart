@@ -25,7 +25,6 @@ class WebSocketClient {
     if (_channel == null) return;
     _channel!.sink.add(jsonEncode(message));
   }
-
   Future<void> disconnect() async {
     await _channel?.sink.close();
     _channel = null;
